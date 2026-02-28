@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>PGP Verify</title>
+  <link rel="stylesheet" href="./style.css" />
+</head>
+<body>
+  <main class="wrap">
+    <header class="header">
+      <h1>PGP Verify</h1>
+      <p class="sub">Cole o conteúdo completo (chave + mensagem/assinatura). Verifica localmente no navegador.</p>
+    </header>
+
+    <section class="card">
+      <div class="field">
+        <label>Cole tudo aqui</label>
+        <textarea id="blob" placeholder="Cole aqui a mensagem assinada / assinatura / chave pública…"></textarea>
+      </div>
+
+      <details class="adv">
+        <summary>Opções avançadas</summary>
+        <div class="field">
+          <label>Chave pública (se não estiver no texto colado)</label>
+          <textarea id="pubkey" placeholder="-----BEGIN PGP PUBLIC KEY BLOCK-----&#10;..."></textarea>
+        </div>
+      </details>
+
+      <div class="actions">
+        <button class="btn primary" id="verify">Verificar</button>
+      </div>
+
+      <section class="result" aria-live="polite">
+        <div class="status" id="status">Cole e clique em “Verificar”.</div>
+        <pre class="meta" id="meta"></pre>
+      </section>
+    </section>
+  </main>
+
+  <script type="module" src="./app.js"></script>
+</body>
+</html>
