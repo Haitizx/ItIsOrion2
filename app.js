@@ -1,28 +1,59 @@
 import * as openpgp from "https://cdn.jsdelivr.net/npm/openpgp@5.11.2/+esm";
 
+/**
+ * Chave pública fixa do Órion (pra não depender do MIT/keyserver caindo)
+ * A ideia é: colou a mensagem assinada → valida com essa key e já era.
+ */
+const ORION_PUBLIC_KEY = `-----BEGIN PGP PUBLIC KEY BLOCK-----
+Version: SKS 1.1.6
+Comment: Hostname: pgp.mit.edu
+
+mDMEaaE93BYJKwYBBAHaRw8BAQdAb3TkLFB8UvgpzMWNzhncHPb9zRj7uS0sqkVrOLIV75G0
+KcOTcmlvbiA8b3Jpb25jb3Jwb3JhdGlvbmJyYXppbEBnbWFpbC5jb20+iLUEExYKAF0WIQS/
+hH7Ox4wJQwaqvbG7+onlH/r93QUCaaE93BsUgAAAAAAEAA5tYW51MiwyLjUrMS4xMSwyLDEC
+GwMFCQWlX5QFCwkIBwICIgIGFQoJCAsCBBYCAwECHgcCF4AACgkQu/qJ5R/6/d3o4AD+K2j3
+yAsk9uhU9GTKpazESzq8+dcjztrsG/Tdc4UsFBkBALXGQ7R/qnarXD3B/XPl+7tvfUJVc2pN
+ZdYpR0rwVAoNuDgEaaE93BIKKwYBBAGXVQEFAQEHQIsATlwZXAq2eeCCkFuvgTYeJV6N2OJi
+jooNMFLsKBI8AwEIB4iaBBgWCgBCFiEEv4R+zseMCUMGqr2xu/qJ5R/6/d0FAmmhPdwbFIAA
+AAAABAAObWFudTIsMi41KzEuMTEsMiwxAhsMBQkFpV+UAAoJELv6ieUf+v3dgP8A/2YNuc/X
+6Shl0BBEvj4hf38L/GvC26t4TUafDJqVPNqRAQDBX9yhgE5xH60NncgS1XA0weoI8Yrvv2SE
+RRgsy9KCAQ==
+=289i
+-----END PGP PUBLIC KEY BLOCK-----`;
+
+/**
+ * Fingerprint “fixado” (anti-troll / anti-troca de chave).
+ * Isso aqui saiu daquele pedaço base64 "v4R+zseMCUMGqr2xu/qJ5R/6/d0" => hex:
+ * bf847ecec78c094306aabdb1bbfa89e51ffafddd
+ */
+const ORION_FINGERPRINT = "BF847ECEC78C094306AABDB1BBFA89E51FFAFDDD";
+
 const $ = (id) => document.getElementById(id);
 
 const els = {
   blob: $("blob"),
-  pubkey: $("pubkey"),
+  pubkey: $("pubkey"), // pode nem existir mais, de boa
   verify: $("verify"),
   status: $("status"),
   meta: $("meta"),
 };
 
 function setStatus(kind, text, meta = "") {
-  els.status.textContent = text;
-  els.meta.textContent = meta;
+  if (els.status) els.status.textContent = text;
+  if (els.meta) els.meta.textContent = meta;
 
-  els.status.style.color =
-    kind === "ok" ? "var(--ok)" :
-    kind === "bad" ? "var(--bad)" :
-    kind === "warn" ? "var(--warn)" :
-    "var(--text)";
+  // corzinha baseada no CSS vars que vc já usou
+  if (els.status) {
+    els.status.style.color =
+      kind === "ok" ? "var(--ok)" :
+      kind === "bad" ? "var(--bad)" :
+      kind === "warn" ? "var(--warn)" :
+      "var(--text)";
+  }
 }
 
 function extractArmoredBlocks(blob) {
-  // captura blocos ASCII armor inteiros
+  // pega qualquer bloco ascii armor PGP que estiver no texto (public key, signature, etc)
   const re = /-----BEGIN PGP ([A-Z ]+)-----[\s\S]*?-----END PGP \1-----/g;
   const blocks = [];
   let m;
@@ -30,6 +61,11 @@ function extractArmoredBlocks(blob) {
     blocks.push({ type: m[1], armored: m[0] });
   }
   return blocks;
+}
+
+function stripArmoredBlocks(blob) {
+  // remove blocos armor e deixa só “o resto” (útil pra detached)
+  return blob.replace(/-----BEGIN PGP ([A-Z ]+)-----[\s\S]*?-----END PGP \1-----/g, "").trim();
 }
 
 function summarizeKey(publicKey) {
@@ -44,12 +80,27 @@ function summarizeKey(publicKey) {
   };
 }
 
-function formatMeta({ publicKey, signature }) {
+function formatMeta({ publicKey, signature, mode }) {
   const k = summarizeKey(publicKey);
-  const created = signature?.signature?.created ? new Date(signature.signature.created).toISOString() : "—";
-  const keyID = signature?.keyID ? String(signature.keyID) : "—";
+
+  // algumas versões expõem created diferente; aqui é “best effort”
+  const created =
+    signature?.signature?.created
+      ? new Date(signature.signature.created).toISOString()
+      : "—";
+
+  // keyID pode ser objeto; tenta pegar um hex bonitinho
+  let keyID = "—";
+  if (signature?.keyID) {
+    try {
+      keyID = signature.keyID.toHex ? signature.keyID.toHex() : String(signature.keyID);
+    } catch {
+      keyID = String(signature.keyID);
+    }
+  }
 
   return [
+    `Modo: ${mode}`,
     `Fingerprint (key): ${k.fingerprint || "—"}`,
     `User IDs: ${k.userIDs?.length ? k.userIDs.join(" | ") : "—"}`,
     `Key algorithm: ${k.algorithm}`,
@@ -58,8 +109,24 @@ function formatMeta({ publicKey, signature }) {
   ].join("\n");
 }
 
-async function verifyCleartext(armoredPublicKey, signedMessageArmored) {
-  const publicKey = await openpgp.readKey({ armoredKey: armoredPublicKey });
+async function loadOrionKey() {
+  // lê a key fixa
+  const publicKey = await openpgp.readKey({ armoredKey: ORION_PUBLIC_KEY });
+
+  // confere fingerprint pra garantir que a key embutida é a esperada (paranóia saudável)
+  const fp = (publicKey.getFingerprint?.() || "").toUpperCase();
+  if (fp && fp !== ORION_FINGERPRINT) {
+    // isso aqui só aconteceria se vc colar uma key errada no ORION_PUBLIC_KEY tlgd
+    throw new Error(
+      `Fingerprint da chave embutida não bate.\nEsperado: ${ORION_FINGERPRINT}\nEncontrado: ${fp}`
+    );
+  }
+
+  return publicKey;
+}
+
+async function verifyCleartextWithOrion(signedMessageArmored) {
+  const publicKey = await loadOrionKey();
   const message = await openpgp.readCleartextMessage({ cleartextMessage: signedMessageArmored });
 
   const result = await openpgp.verify({
@@ -67,13 +134,21 @@ async function verifyCleartext(armoredPublicKey, signedMessageArmored) {
     verificationKeys: publicKey,
   });
 
-  const sig = result.signatures[0];
-  await sig.verified;
-  return { publicKey, signature: sig, mode: "cleartext" };
+  // pode ter mais de 1 assinatura; a gente tenta todas e aceita a primeira que validar
+  for (const sig of result.signatures) {
+    try {
+      await sig.verified;
+      return { publicKey, signature: sig, mode: "cleartext" };
+    } catch {
+      // tenta a próxima
+    }
+  }
+
+  throw new Error("Nenhuma assinatura válida encontrada (cleartext).");
 }
 
-async function verifyDetached(armoredPublicKey, messageText, signatureArmored) {
-  const publicKey = await openpgp.readKey({ armoredKey: armoredPublicKey });
+async function verifyDetachedWithOrion(messageText, signatureArmored) {
+  const publicKey = await loadOrionKey();
   const message = await openpgp.createMessage({ text: messageText });
   const signature = await openpgp.readSignature({ armoredSignature: signatureArmored });
 
@@ -83,77 +158,87 @@ async function verifyDetached(armoredPublicKey, messageText, signatureArmored) {
     verificationKeys: publicKey,
   });
 
-  const sig = result.signatures[0];
-  await sig.verified;
-  return { publicKey, signature: sig, mode: "detached" };
-}
-
-function stripArmoredBlocks(blob) {
-  // remove qualquer bloco armor e deixa “o resto” como possível texto assinado (detached)
-  return blob.replace(/-----BEGIN PGP ([A-Z ]+)-----[\s\S]*?-----END PGP \1-----/g, "").trim();
-}
-
-els.verify.addEventListener("click", async () => {
-  const blob = els.blob.value;
-  const fallbackPub = els.pubkey.value.trim();
-
-  if (!blob.trim()) {
-    setStatus("warn", "Cole algum conteúdo.", "");
-    return;
+  for (const sig of result.signatures) {
+    try {
+      await sig.verified;
+      return { publicKey, signature: sig, mode: "detached" };
+    } catch {
+      // tenta a próxima
+    }
   }
 
-  try {
-    setStatus("neutral", "Analisando…", "");
+  throw new Error("Assinatura inválida (detached).");
+}
 
-    const blocks = extractArmoredBlocks(blob);
+// se o botão não existir, não quebra a página
+if (els.verify) {
+  els.verify.addEventListener("click", async () => {
+    const blob = els.blob?.value || "";
+    const fallbackPub = els.pubkey?.value?.trim?.() || ""; // não uso mais, mas deixei pq seu html tinha
 
-    // 1) chave pública: pode estar no blob ou no campo avançado
-    const pubBlock = blocks.find(b => b.type === "PUBLIC KEY BLOCK")?.armored || fallbackPub;
-    if (!pubBlock || !pubBlock.includes("BEGIN PGP PUBLIC KEY BLOCK")) {
+    if (!blob.trim()) {
+      setStatus("warn", "Cole a mensagem assinada do Órion aí.", "");
+      return;
+    }
+
+    try {
+      setStatus("neutral", "Verificando…", "");
+
+      // a key sempre é a do Órion.
+      void fallbackPub;
+
+      const blocks = extractArmoredBlocks(blob);
+
+      // 1) cleartext é o caso padrão do ARG (BEGIN PGP SIGNED MESSAGE)
+      if (blob.includes("-----BEGIN PGP SIGNED MESSAGE-----")) {
+        const start = blob.indexOf("-----BEGIN PGP SIGNED MESSAGE-----");
+        const signedArmored = blob.slice(start).trim();
+
+        const out = await verifyCleartextWithOrion(signedArmored);
+
+        const fp = (out.publicKey.getFingerprint?.() || "").toUpperCase();
+        const okFp = fp === ORION_FINGERPRINT;
+
+        setStatus(
+          "ok",
+          `✅ Assinatura VÁLIDA (Órion)`,
+          formatMeta(out) + `\n\nFingerprint conferido: ${okFp ? "SIM" : "NÃO"}`
+        );
+        return;
+      }
+
+      // 2) se não for cleartext, tenta detached (caso alguém mande só assinatura + texto)
+      const sigBlock = blocks.find(b => b.type === "SIGNATURE")?.armored;
+      if (!sigBlock) {
+        setStatus("warn", "Não achei 'BEGIN PGP SIGNED MESSAGE' nem 'BEGIN PGP SIGNATURE'.", "");
+        return;
+      }
+
+      const msgText = stripArmoredBlocks(blob);
+      if (!msgText) {
+        setStatus(
+          "warn",
+          "Achei a assinatura, mas não achei a mensagem (texto fora dos blocos).",
+          "Se for detached, cola a mensagem original junto do bloco de assinatura."
+        );
+        return;
+      }
+
+      const out = await verifyDetachedWithOrion(msgText, sigBlock);
+
+      const fp = (out.publicKey.getFingerprint?.() || "").toUpperCase();
+      const okFp = fp === ORION_FINGERPRINT;
+
       setStatus(
-        "warn",
-        "Não achei a chave pública. Cole junto no texto (PUBLIC KEY BLOCK) ou use Opções avançadas.",
-        ""
+        "ok",
+        `✅ Assinatura VÁLIDA (Órion)`,
+        formatMeta(out) + `\n\nFingerprint conferido: ${okFp ? "SIM" : "NÃO"}`
       );
-      return;
+    } catch (e) {
+      setStatus("bad", "❌ Assinatura INVÁLIDA (ou mensagem alterada)", String(e));
     }
-
-    // 2) Se tiver SIGNED MESSAGE no blob, é cleartext (verificação direta)
-    const hasSigned = blob.includes("BEGIN PGP SIGNED MESSAGE");
-    if (hasSigned) {
-      // aqui é importante: usar o blob inteiro que contém o signed message
-      // (o readCleartextMessage lida com o bloco completo)
-      const signedStart = blob.indexOf("-----BEGIN PGP SIGNED MESSAGE-----");
-      const signedArmored = blob.slice(signedStart).trim();
-
-      const out = await verifyCleartext(pubBlock, signedArmored);
-      setStatus("ok", `✅ Assinatura VÁLIDA (${out.mode})`, formatMeta(out));
-      return;
-    }
-
-    // 3) Caso contrário, tente detached:
-    // precisa de uma SIGNATURE armor + o texto (fora dos blocos)
-    const sigBlock = blocks.find(b => b.type === "SIGNATURE")?.armored;
-    if (!sigBlock) {
-      setStatus("warn", "Não achei bloco de assinatura (BEGIN PGP SIGNATURE).", "");
-      return;
-    }
-
-    // texto “mensagem” = tudo fora dos blocos armor
-    const msgText = stripArmoredBlocks(blob);
-
-    if (!msgText) {
-      setStatus(
-        "warn",
-        "Achei a assinatura, mas não achei texto de mensagem fora dos blocos. Para detached, cole também o texto original junto.",
-        ""
-      );
-      return;
-    }
-
-    const out = await verifyDetached(pubBlock, msgText, sigBlock);
-    setStatus("ok", `✅ Assinatura VÁLIDA (${out.mode})`, formatMeta(out));
-  } catch (e) {
-    setStatus("bad", "❌ Assinatura INVÁLIDA (ou dados inconsistentes)", String(e));
-  }
-});
+  });
+} else {
+  // se tu tiver mexido no HTML e sumiu o botão, isso aqui te lembra tlgd
+  console.warn("Botão #verify não encontrado. Confere seu HTML.");
+}
