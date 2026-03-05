@@ -33,7 +33,7 @@ body::before{
   background:
     radial-gradient(1200px 700px at 50% 45%, rgba(255,255,255,.08), transparent 60%),
     radial-gradient(900px 500px at 50% 55%, rgba(255,255,255,.05), transparent 68%),
-    url("Estrela.png");
+    url("Estrela2.png");
   background-repeat:no-repeat;
   background-position:center;
   background-size: 260px auto;
