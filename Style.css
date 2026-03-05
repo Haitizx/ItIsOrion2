@@ -89,7 +89,7 @@ body::after{
   width: 92px;
   height: 66px;
   margin: 4px auto 10px;
-  background: url("./Estrela.png") center / contain no-repeat;
+  background: url("./Estrela2.png") center / contain no-repeat;
   opacity: .9;
   filter: drop-shadow(0 0 10px rgba(255,255,255,.08));
 }
